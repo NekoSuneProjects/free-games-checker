@@ -1,14 +1,16 @@
 export interface EpicGamesInterface {
-    games: {
-        id: number
-        title: string
-        offerType: string
-        mainImage: string
-        originalPrice: string
-        description: string
-        productSlug: string
-        urlSlug: string
-        startDate: string,
-        endDate: string
-    }
+    id: string;
+    title: string;
+    offerType: string;
+    description: string;
+    keyImages: { url: string }[];
+    urlSlug: string;
+    promotions: {
+        promotionalOffers: {
+            promotionalOffers: {
+                startDate: string;
+                endDate: string;
+            }[];
+        }[];
+    };
 }

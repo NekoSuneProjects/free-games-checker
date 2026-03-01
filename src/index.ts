@@ -1,120 +1,129 @@
 import {EpicGamesInterface} from "./interfaces/epic-games.interface";
+import { FreeGameInterface } from "./interfaces/free-game.interface";
 import axios, {AxiosResponse} from "axios";
 import * as config from '../config.json';
 
-export const getFreeGames = async (country: string) => {
-    if (!country) {
-        throw new Error('Country is required');
-    }
+/* ================================
+   Main Aggregator
+================================ */
 
-    // Fetch games from Epic Games and Steam
-    const epicGames = await getEpicGames(country);
-    const steamGames = await getSteamGames();
+export const getFreeGames = async (country: string): Promise<FreeGameInterface[]> => {
+    if (!country) throw new Error("Country is required");
 
-    // Merge and return the results
-    return [...epicGames, ...steamGames];
+    const [
+        epicGames,
+        steamGames,
+        amazonGames,
+        gogGames,
+        ubisoftGames
+    ] = await Promise.all([
+        getEpicGames(country),
+        getSteamGames(),
+        getAmazonGames(),
+        getGogGames(),
+        getUbisoftGames()
+    ]);
+
+    return [
+        ...epicGames,
+        ...steamGames,
+        ...amazonGames,
+        ...gogGames,
+        ...ubisoftGames
+    ];
 };
 
-export const getEpicGames = async (country: string) => {
-    const games = await axios.get(
-        config.epic_games_api_url + country
-    ).then(response => response.data);
+/* ================================
+   Epic Games
+================================ */
 
-    return await filterEpicGames(games, "epicgames");
-}
+export const getEpicGames = async (country: string): Promise<FreeGameInterface[]> => {
+    const response = await axios.get(config.epic_games_api_url + country);
+    const games = response.data?.data?.Catalog?.searchStore?.elements ?? [];
 
+    return games
+        .filter((game: any) =>
+            game.offerType === "BASE_GAME" &&
+            game.promotions?.promotionalOffers?.length > 0
+        )
+        .map((game: any): FreeGameInterface => {
+            const promo = game.promotions.promotionalOffers[0].promotionalOffers[0];
 
-// Fetch games from Steam API
-export const getSteamGames = async () => {
-    // Fetch the list of all Steam apps
-    const appList = await axios.get(
-        config.steam_app_list_url
-    ).then((response) => response.data?.applist?.apps);
+            return {
+                id: game.id,
+                title: game.title,
+                description: game.description,
+                mainImage: game.keyImages?.[0]?.url ?? "",
+                url: `https://store.epicgames.com/p/${game.urlSlug}`,
+                platform: "epicgames",
+                startDate: promo.startDate,
+                endDate: promo.endDate
+            };
+        });
+};
 
-    if (!appList || appList.length === 0) {
-        throw new Error("Failed to retrieve the Steam app list.");
-    }
+/* ================================
+   Steam (Featured Specials API)
+================================ */
 
-    // Limit the number of games to check for detailed data (to avoid excessive API requests)
-    const limitedAppList = appList.slice(0, 50); // Adjust the number of games as needed
-    const gameDetailsPromises = limitedAppList.map((app: { appid: number }) =>
-        fetchSteamGameDetails(app.appid)
-    );
+export const getSteamGames = async (): Promise<FreeGameInterface[]> => {
+    const response = await axios.get(config.steam_featured_categories_url);
+    const specials = response.data?.specials?.items ?? [];
 
-    // Wait for all game details to be fetched
-    const gamesWithDetails = await Promise.all(gameDetailsPromises);
+    return specials
+        .filter((game: any) =>
+            game.type === 0 &&
+            game.discounted === true &&
+            game.discount_percent === 100 &&
+            game.original_price > 0 &&
+            game.final_price === 0 &&
+            game.discount_expiration
+        )
+        .map((game: any): FreeGameInterface => ({
+            id: game.id,
+            title: game.name,
+            description: "Limited-time free on Steam",
+            mainImage: game.header_image || game.large_capsule_image,
+            url: `https://store.steampowered.com/app/${game.id}`,
+            platform: "steam",
+            endDate: new Date(game.discount_expiration * 1000).toISOString()
+        }));
+};
 
-    // Filter games based on their price and promotional status
-    const filteredGames = gamesWithDetails.filter(
-        (game) =>
-            game &&
-            game.isFree === false && // Exclude always-free games
-            game.currentPrice === 0 && // Free for a limited time
-            game.discount > 0 // Ensure it's part of a promotion
-    );
+/* ================================
+   Amazon Games (Prime Gaming)
+   (Stub – requires HTML parsing)
+================================ */
 
-    // Map the data into a consistent format
-    return filteredGames.map((game) => ({
-        id: game.appid,
-        title: game.name,
-        description: game.shortDescription || "No description available.",
-        mainImage: game.headerImage,
-        urlSlug: `https://store.steampowered.com/app/${game.appid}`,
-        platform: "steam",
+export const getAmazonGames = async (): Promise<FreeGameInterface[]> => {
+    // TODO: Parse __NEXT_DATA__ from https://gaming.amazon.com/home
+    return [];
+};
+
+/* ================================
+   Ubisoft / Uplay
+   (Stub – requires store parsing)
+================================ */
+
+export const getUbisoftGames = async (): Promise<FreeGameInterface[]> => {
+    // TODO: Detect "Free to claim" promotions
+    return [];
+};
+
+/* ================================
+   GOG
+================================ */
+
+export const getGogGames = async (): Promise<FreeGameInterface[]> => {
+    const response = await axios.get(config.gog_promotions_api_url);
+    const products = response.data?.products ?? [];
+
+    return products.map((game: any): FreeGameInterface => ({
+        id: game.id,
+        title: game.title,
+        description: "Free on GOG (limited-time)",
+        mainImage: game.image,
+        url: `https://www.gog.com/game/${game.slug}`,
+        platform: "gog"
     }));
 };
-
-// Fetch detailed information for a single Steam game
-const fetchSteamGameDetails = async (appid: number) => {
-    try {
-        const response = await axios.get(
-            `${config.steam_store_details_url}?appids=${appid}`
-        );
-        const data = response.data[appid.toString()]?.data;
-
-        if (!data || !data.price_overview) {
-            return null; // Skip if price data is not available
-        }
-
-        const { price_overview, short_description, header_image } = data;
-
-        return {
-            appid: appid,
-            name: data.name,
-            shortDescription: short_description,
-            headerImage: header_image,
-            isFree: data.is_free,
-            originalPrice: price_overview.initial / 100, // Convert cents to dollars
-            currentPrice: price_overview.final / 100, // Convert cents to dollars
-            discount: price_overview.discount_percent, // Discount percentage
-        };
-    } catch (error) {
-        console.error(`Failed to fetch details for appid ${appid}:`, error);
-        return null;
-    }
-};
-
-// Filter Epic Games data
-async function filterEpicGames(data: any) {
-    const gamesObj = data?.data?.Catalog?.searchStore?.elements;
-
-    const filteredGames = gamesObj?.filter(
-        (game: { offerType: string; promotions: { promotionalOffers: any[] }; }) =>
-            game.offerType === "BASE_GAME" &&
-            game.promotions?.promotionalOffers?.length > 0 &&
-            Date.parse(game.promotions.promotionalOffers[0]?.promotionalOffers[0]?.startDate) < Date.now()
-    );
-
-    if (filteredGames?.length > 0) {
-        return filteredGames.map((game: any) => ({
-            id: game.id,
-            title: game.title,
-            description: game.description,
-            mainImage: game.keyImages[1]?.url ?? game.keyImages[0]?.url,
-            urlSlug: game.urlSlug,
-            platform: "epicgames"
-        }));
-    }
-
-    return [];
-}
