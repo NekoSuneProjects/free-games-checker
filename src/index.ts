@@ -2,25 +2,148 @@ import { FreeGameInterface } from "./interfaces/free-game.interface";
 import axios from "axios";
 import * as config from "../config.json";
 
+type ServiceKey =
+    "freetogame"
+    | "gamerpower"
+    | "humble"
+    | "epic"
+    | "steam"
+    | "ubisoft"
+    | "gog"
+    | "default";
+
+interface CacheEntry {
+    expiresAt: number;
+    data: any;
+}
+
+interface RequestOptions {
+    ttlMs?: number;
+    forceRefresh?: boolean;
+}
+
+export interface FetchControlOptions {
+    forceRefresh?: boolean;
+}
+
+const responseCache = new Map<string, CacheEntry>();
+const inFlightRequests = new Map<string, Promise<any>>();
+const limiterNextAllowedAt = new Map<ServiceKey, number>();
+
+const CACHE_TTL_DEFAULT_MS = 5 * 60 * 1000;
+const CACHE_TTL_STEAM_APP_MS = 30 * 60 * 1000;
+
+const RATE_LIMIT_INTERVALS_MS: Record<ServiceKey, number> = {
+    freetogame: 100,
+    gamerpower: 250,
+    humble: 500,
+    epic: 200,
+    steam: 350,
+    ubisoft: 350,
+    gog: 350,
+    default: 350
+};
+
+const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+const getServiceFromUrl = (url: string): ServiceKey => {
+    if (url.includes("freetogame.com")) return "freetogame";
+    if (url.includes("gamerpower.com")) return "gamerpower";
+    if (url.includes("humblebundle.com")) return "humble";
+    if (url.includes("epicgames.com")) return "epic";
+    if (url.includes("steampowered.com")) return "steam";
+    if (url.includes("ubiservices.ubi.com") || url.includes("ubisoft.com")) return "ubisoft";
+    if (url.includes("gog.com")) return "gog";
+    return "default";
+};
+
+const buildCacheKey = (url: string, requestConfig?: any): string => {
+    return JSON.stringify({
+        url,
+        params: requestConfig?.params ?? null,
+        headers: requestConfig?.headers ?? null
+    });
+};
+
+const pruneCache = (): void => {
+    if (responseCache.size <= 1000) return;
+    const now = Date.now();
+
+    responseCache.forEach((entry, key) => {
+        if (entry.expiresAt <= now) responseCache.delete(key);
+    });
+
+    while (responseCache.size > 750) {
+        const firstKey = responseCache.keys().next().value;
+        if (!firstKey) break;
+        responseCache.delete(firstKey);
+    }
+};
+
+const waitForRateLimit = async (url: string): Promise<void> => {
+    const service = getServiceFromUrl(url);
+    const intervalMs = RATE_LIMIT_INTERVALS_MS[service] ?? RATE_LIMIT_INTERVALS_MS.default;
+    const now = Date.now();
+    const nextAllowedAt = limiterNextAllowedAt.get(service) ?? now;
+    const waitMs = Math.max(0, nextAllowedAt - now);
+
+    limiterNextAllowedAt.set(service, Math.max(now, nextAllowedAt) + intervalMs);
+    if (waitMs > 0) await sleep(waitMs);
+};
+
+const safeGet = async (url: string, requestConfig?: any, options?: RequestOptions): Promise<any> => {
+    const ttlMs = options?.ttlMs ?? CACHE_TTL_DEFAULT_MS;
+    const forceRefresh = options?.forceRefresh === true;
+    const cacheKey = buildCacheKey(url, requestConfig);
+    const now = Date.now();
+    const cached = forceRefresh ? undefined : responseCache.get(cacheKey);
+
+    if (cached && cached.expiresAt > now) return cached.data;
+
+    const inFlight = forceRefresh ? undefined : inFlightRequests.get(cacheKey);
+    if (inFlight) return inFlight;
+
+    const requestPromise = (async () => {
+        await waitForRateLimit(url);
+        const response = await axios.get(url, requestConfig);
+        responseCache.set(cacheKey, { expiresAt: Date.now() + ttlMs, data: response.data });
+        pruneCache();
+        return response.data;
+    })();
+
+    inFlightRequests.set(cacheKey, requestPromise);
+
+    try {
+        return await requestPromise;
+    } finally {
+        inFlightRequests.delete(cacheKey);
+    }
+};
+
+export const clearRequestCache = (): void => {
+    responseCache.clear();
+    inFlightRequests.clear();
+};
+
 /* ================================
    Main Aggregator
 ================================ */
 
-export const getFreeGames = async (country: string): Promise<FreeGameInterface[]> => {
+export const getFreeGames = async (country: string, options?: FetchControlOptions): Promise<FreeGameInterface[]> => {
     if (!country) throw new Error("Country is required");
 
-    const primaryGames = await getPrimaryGames(country);
+    const primaryGames = await getPrimaryGames(country, options);
     if (primaryGames.length > 0) return primaryGames;
 
     const [gamerPowerGames, freeToGameGames] = await Promise.all([
-        getGamerPowerGames(),
-        getFreeToGameGames()
+        getGamerPowerGames(undefined, options),
+        getFreeToGameGames({ forceRefresh: options?.forceRefresh })
     ]);
 
     return [...gamerPowerGames, ...freeToGameGames];
 };
 
-const getPrimaryGames = async (country: string): Promise<FreeGameInterface[]> => {
+const getPrimaryGames = async (country: string, options?: FetchControlOptions): Promise<FreeGameInterface[]> => {
     const [
         epicGames,
         steamGames,
@@ -29,12 +152,12 @@ const getPrimaryGames = async (country: string): Promise<FreeGameInterface[]> =>
         gogGames,
         ubisoftGames
     ] = await Promise.all([
-        getEpicGames(country),
-        getSteamGames(),
-        getHumbleGames(),
+        getEpicGames(country, options),
+        getSteamGames(options),
+        getHumbleGames(options),
         getAmazonGames(),
-        getGogGames(),
-        getUbisoftGames()
+        getGogGames(options),
+        getUbisoftGames(options)
     ]);
 
     const primaryGames = [
@@ -51,20 +174,36 @@ const getPrimaryGames = async (country: string): Promise<FreeGameInterface[]> =>
 
 export interface FallbackOptions {
     gamerPowerPlatforms?: string[];
+    gamerPowerCategories?: string[];
+    freeToGamePlatforms?: string[];
+    freeToGameCategory?: string;
+    freeToGameSortBy?: "release-date" | "alphabetical" | "relevance";
 }
 
 export const getFreeGamesWithFallbackOptions = async (
     country: string,
-    fallbackOptions: FallbackOptions
+    fallbackOptions: FallbackOptions,
+    options?: FetchControlOptions
 ): Promise<FreeGameInterface[]> => {
     if (!country) throw new Error("Country is required");
 
-    const primaryGames = await getPrimaryGames(country);
+    const primaryGames = await getPrimaryGames(country, options);
     if (primaryGames.length > 0) return primaryGames;
 
     const [gamerPowerGames, freeToGameGames] = await Promise.all([
-        getGamerPowerGames(fallbackOptions.gamerPowerPlatforms),
-        getFreeToGameGames()
+        getGamerPowerGames(
+            fallbackOptions.gamerPowerPlatforms,
+            {
+                categories: fallbackOptions.gamerPowerCategories,
+                forceRefresh: options?.forceRefresh
+            }
+        ),
+        getFreeToGameGames({
+            platforms: fallbackOptions.freeToGamePlatforms,
+            category: fallbackOptions.freeToGameCategory,
+            sortBy: fallbackOptions.freeToGameSortBy,
+            forceRefresh: options?.forceRefresh
+        })
     ]);
 
     return [...gamerPowerGames, ...freeToGameGames];
@@ -74,9 +213,9 @@ export const getFreeGamesWithFallbackOptions = async (
    Epic Games
 ================================ */
 
-export const getEpicGames = async (country: string): Promise<FreeGameInterface[]> => {
-    const response = await axios.get(config.epic_games_api_url + country);
-    const games = response.data?.data?.Catalog?.searchStore?.elements ?? [];
+export const getEpicGames = async (country: string, options?: FetchControlOptions): Promise<FreeGameInterface[]> => {
+    const data = await safeGet(config.epic_games_api_url + country, undefined, { forceRefresh: options?.forceRefresh });
+    const games = data?.data?.Catalog?.searchStore?.elements ?? [];
 
     return games
         .filter((game: any) =>
@@ -129,10 +268,13 @@ const extractSteamRows = (resultsHtml: string): { id: string; title: string }[] 
     return rows;
 };
 
-const isSteamDlc = async (appId: string): Promise<boolean | null> => {
+const isSteamDlc = async (appId: string, options?: FetchControlOptions): Promise<boolean | null> => {
     try {
-        const response = await axios.get(`${config.steam_app_url}${appId}`);
-        const html = response.data as string;
+        const html = await safeGet(
+            `${config.steam_app_url}${appId}`,
+            undefined,
+            { ttlMs: CACHE_TTL_STEAM_APP_MS, forceRefresh: options?.forceRefresh }
+        ) as string;
         const hasDlcArea = html.includes("game_area_dlc_bubble");
         const hasPurchaseArea = html.includes("game_area_purchase_game_wrapper");
 
@@ -144,14 +286,14 @@ const isSteamDlc = async (appId: string): Promise<boolean | null> => {
     }
 };
 
-export const getSteamGames = async (): Promise<FreeGameInterface[]> => {
-    const response = await axios.get(config.steam_search_results_url);
-    const resultsHtml = response.data?.results_html ?? "";
+export const getSteamGames = async (options?: FetchControlOptions): Promise<FreeGameInterface[]> => {
+    const data = await safeGet(config.steam_search_results_url, undefined, { forceRefresh: options?.forceRefresh });
+    const resultsHtml = data?.results_html ?? "";
     const steamRows = extractSteamRows(resultsHtml);
     const parsedGames: FreeGameInterface[] = [];
 
     for (const row of steamRows) {
-        const dlc = await isSteamDlc(row.id);
+        const dlc = await isSteamDlc(row.id, options);
         if (dlc === false) {
             parsedGames.push({
                 id: row.id,
@@ -171,10 +313,10 @@ export const getSteamGames = async (): Promise<FreeGameInterface[]> => {
    Humble Bundle
 ================================ */
 
-export const getHumbleGames = async (): Promise<FreeGameInterface[]> => {
+export const getHumbleGames = async (options?: FetchControlOptions): Promise<FreeGameInterface[]> => {
     try {
-        const response = await axios.get(config.humble_bundle_api_url);
-        const results = response.data?.results ?? [];
+        const data = await safeGet(config.humble_bundle_api_url, undefined, { forceRefresh: options?.forceRefresh });
+        const results = data?.results ?? [];
 
         return results
             .filter((game: any) => game.current_price?.amount === 0)
@@ -205,16 +347,16 @@ export const getAmazonGames = async (): Promise<FreeGameInterface[]> => {
    Ubisoft / Ubisoft Connect
 ================================ */
 
-export const getUbisoftGames = async (): Promise<FreeGameInterface[]> => {
+export const getUbisoftGames = async (options?: FetchControlOptions): Promise<FreeGameInterface[]> => {
     try {
-        const response = await axios.get(config.ubisoft_news_api_url, {
+        const data = await safeGet(config.ubisoft_news_api_url, {
             headers: {
                 "ubi-appid": config.ubisoft_app_id,
                 "ubi-localecode": "en-US",
                 "user-agent": "Mozilla/5.0"
             }
-        });
-        const news = response.data?.news ?? [];
+        }, { forceRefresh: options?.forceRefresh });
+        const news = data?.news ?? [];
 
         return news
             .filter((item: any) => item.type === "freegame" && item.expirationDate)
@@ -293,15 +435,15 @@ const getGogGiveawayGame = (html: string): FreeGameInterface[] => {
     }];
 };
 
-export const getGogGames = async (): Promise<FreeGameInterface[]> => {
+export const getGogGames = async (options?: FetchControlOptions): Promise<FreeGameInterface[]> => {
     try {
         const [promoResponse, storeResponse, homeResponse] = await Promise.all([
-            axios.get(config.gog_promotions_api_url),
-            axios.get(config.gog_store_free_discounted_url, { headers: { "user-agent": "Mozilla/5.0" } }),
-            axios.get(config.gog_home_url, { headers: { "user-agent": "Mozilla/5.0" } })
+            safeGet(config.gog_promotions_api_url, undefined, { forceRefresh: options?.forceRefresh }),
+            safeGet(config.gog_store_free_discounted_url, { headers: { "user-agent": "Mozilla/5.0" } }, { forceRefresh: options?.forceRefresh }),
+            safeGet(config.gog_home_url, { headers: { "user-agent": "Mozilla/5.0" } }, { forceRefresh: options?.forceRefresh })
         ]);
 
-        const promoProducts = promoResponse.data?.products ?? [];
+        const promoProducts = promoResponse?.products ?? [];
         const promoGames = promoProducts.map((game: any): FreeGameInterface => ({
             id: game.id,
             title: game.title,
@@ -311,8 +453,8 @@ export const getGogGames = async (): Promise<FreeGameInterface[]> => {
             platform: "gog"
         }));
 
-        const storeGames = getGogStoreGames(storeResponse.data as string);
-        const giveawayGames = getGogGiveawayGame(homeResponse.data as string);
+        const storeGames = getGogStoreGames(storeResponse as string);
+        const giveawayGames = getGogGiveawayGame(homeResponse as string);
         const combined = [...giveawayGames, ...storeGames, ...promoGames];
         const deduped = new Map<string, FreeGameInterface>();
 
@@ -339,38 +481,82 @@ const toIsoDate = (rawDate: string | null | undefined): string | undefined => {
     return parsed.toISOString();
 };
 
-const mapGamerPowerGiveaways = (giveaways: any[]): FreeGameInterface[] => {
+const normalizeGiveawayCategory = (item: any): string => {
+    const rawType = String(item?.type ?? "").toLowerCase();
+    const text = `${item?.title ?? ""} ${item?.description ?? ""}`.toLowerCase();
+
+    if (text.includes("dlc")) return "dlc";
+    if (text.includes("software")) return "software";
+    if (text.includes("game code") || text.includes("game codes") || text.includes("game key") || text.includes("cd key") || text.includes("key giveaway")) {
+        return "game-code";
+    }
+    if (rawType.includes("game")) return "game";
+    if (rawType.includes("loot")) return "loot";
+    if (rawType.includes("beta")) return "beta";
+    return rawType || "other";
+};
+
+const normalizeCategoryFilter = (input: string): string => {
+    const value = String(input || "").toLowerCase().trim().replace(/\s+/g, "-");
+    if (value === "giveaways") return "giveaway";
+    if (value === "games") return "game";
+    if (value === "dlcs") return "dlc";
+    if (value === "softwares") return "software";
+    if (value === "game-codes" || value === "game-code" || value === "codes" || value === "code") return "game-code";
+    return value;
+};
+
+const mapGamerPowerGiveaways = (giveaways: any[], categoryFilter?: Set<string>): FreeGameInterface[] => {
     return giveaways
-        .filter((item: any) => item.status === "Active" && item.type === "Game")
+        .filter((item: any) => item.status === "Active")
+        .map((item: any) => ({
+            item,
+            normalizedCategory: normalizeGiveawayCategory(item)
+        }))
+        .filter((mapped: any) =>
+            !categoryFilter ||
+            categoryFilter.size === 0 ||
+            categoryFilter.has("giveaway") ||
+            categoryFilter.has(mapped.normalizedCategory)
+        )
         .map((item: any): FreeGameInterface => ({
-            id: item.id,
-            title: item.title,
-            description: item.description || "Free giveaway listed on GamerPower",
-            mainImage: item.image || item.thumbnail || "",
-            url: item.open_giveaway || item.open_giveaway_url || item.gamerpower_url || "https://www.gamerpower.com/",
+            id: item.item.id,
+            title: item.item.title,
+            description: item.item.description || "Free giveaway listed on GamerPower",
+            mainImage: item.item.image || item.item.thumbnail || "",
+            url: item.item.open_giveaway || item.item.open_giveaway_url || item.item.gamerpower_url || "https://www.gamerpower.com/",
             platform: "gamerpower",
-            startDate: toIsoDate(item.published_date),
-            endDate: toIsoDate(item.end_date)
+            category: item.normalizedCategory,
+            startDate: toIsoDate(item.item.published_date),
+            endDate: toIsoDate(item.item.end_date)
         }));
 };
 
-export const getGamerPowerGames = async (platforms?: string[]): Promise<FreeGameInterface[]> => {
+export interface GamerPowerOptions extends FetchControlOptions {
+    categories?: string[];
+}
+
+export const getGamerPowerGames = async (platforms?: string[], options?: GamerPowerOptions): Promise<FreeGameInterface[]> => {
     try {
+        const categoryFilter = options?.categories && options.categories.length > 0
+            ? new Set(options.categories.map((category: string) => normalizeCategoryFilter(category)))
+            : undefined;
+
         if (!platforms || platforms.length === 0) {
-            const response = await axios.get(config.gamerpower_api_url);
-            return mapGamerPowerGiveaways(response.data ?? []);
+            const data = await safeGet(config.gamerpower_api_url, undefined, { forceRefresh: options?.forceRefresh });
+            return mapGamerPowerGiveaways(data ?? [], categoryFilter);
         }
 
-        const responses = await Promise.all(
+        const responsesData = await Promise.all(
             platforms.map((platform: string) =>
-                axios.get(`${config.gamerpower_api_url}?platform=${encodeURIComponent(platform)}`)
+                safeGet(`${config.gamerpower_api_url}?platform=${encodeURIComponent(platform)}`, undefined, { forceRefresh: options?.forceRefresh })
             )
         );
         const deduped = new Map<string, FreeGameInterface>();
         const all: FreeGameInterface[] = [];
 
-        for (const response of responses) {
-            all.push(...mapGamerPowerGiveaways(response.data ?? []));
+        for (const data of responsesData) {
+            all.push(...mapGamerPowerGiveaways(data ?? [], categoryFilter));
         }
 
         for (const game of all) {
@@ -384,20 +570,64 @@ export const getGamerPowerGames = async (platforms?: string[]): Promise<FreeGame
     }
 };
 
-export const getFreeToGameGames = async (): Promise<FreeGameInterface[]> => {
-    try {
-        const response = await axios.get(config.freetogame_api_url);
-        const games = response.data ?? [];
+export interface FreeToGameOptions {
+    platforms?: string[];
+    category?: string;
+    sortBy?: "release-date" | "alphabetical" | "relevance";
+    forceRefresh?: boolean;
+}
 
-        return games.map((item: any): FreeGameInterface => ({
-            id: item.id,
-            title: item.title,
-            description: item.short_description || "Free-to-play game listed on FreeToGame",
-            mainImage: item.thumbnail || "",
-            url: item.game_url || item.freetogame_profile_url || "https://www.freetogame.com/",
-            platform: "freetogame",
-            startDate: toIsoDate(item.release_date)
-        }));
+const mapFreeToGameGames = (games: any[]): FreeGameInterface[] => {
+    return games.map((item: any): FreeGameInterface => ({
+        id: item.id,
+        title: item.title,
+        description: item.short_description || "Free-to-play game listed on FreeToGame",
+        mainImage: item.thumbnail || "",
+        url: item.game_url || item.freetogame_profile_url || "https://www.freetogame.com/",
+        platform: "freetogame",
+        category: item.genre ? String(item.genre).toLowerCase() : "game",
+        startDate: toIsoDate(item.release_date)
+    }));
+};
+
+export const getFreeToGameGames = async (options?: FreeToGameOptions): Promise<FreeGameInterface[]> => {
+    try {
+        const params: string[] = [];
+        if (options?.category) params.push(`category=${encodeURIComponent(options.category)}`);
+        if (options?.sortBy) params.push(`sort-by=${encodeURIComponent(options.sortBy)}`);
+        const queryPrefix = params.length > 0 ? `&${params.join("&")}` : "";
+
+        if (!options?.platforms || options.platforms.length === 0) {
+            const data = await safeGet(
+                `${config.freetogame_api_url}?platform=all${queryPrefix}`,
+                undefined,
+                { forceRefresh: options?.forceRefresh }
+            );
+            return mapFreeToGameGames(data ?? []);
+        }
+
+        const responsesData = await Promise.all(
+            options.platforms.map((platform: string) =>
+                safeGet(
+                    `${config.freetogame_api_url}?platform=${encodeURIComponent(platform)}${queryPrefix}`,
+                    undefined,
+                    { forceRefresh: options?.forceRefresh }
+                )
+            )
+        );
+        const deduped = new Map<string, FreeGameInterface>();
+        const all: FreeGameInterface[] = [];
+
+        for (const data of responsesData) {
+            all.push(...mapFreeToGameGames(data ?? []));
+        }
+
+        for (const game of all) {
+            const key = String(game.id);
+            if (!deduped.has(key)) deduped.set(key, game);
+        }
+
+        return Array.from(deduped.values());
     } catch {
         return [];
     }

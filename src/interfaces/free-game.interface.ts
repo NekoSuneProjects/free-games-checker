@@ -6,6 +6,7 @@ export interface FreeGameInterface {
     mainImage: string;
     url: string;
     platform: "epicgames" | "steam" | "humble" | "amazon" | "ubisoft" | "gog" | "gamerpower" | "freetogame";
+    category?: string;
     startDate?: string;
     endDate?: string;
 }

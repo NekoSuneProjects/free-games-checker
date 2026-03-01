@@ -30,6 +30,7 @@ import {
   getFreeGamesWithFallbackOptions,
   getGamerPowerGames,
   getFreeToGameGames,
+  clearRequestCache,
   getEpicGames,
   getSteamGames,
   getUbisoftGames,
@@ -40,16 +41,36 @@ import {
 async function main() {
   const all = await getFreeGames("US");
   console.log("getFreeGames", all.length);
+  const repulled = await getFreeGames("US", { forceRefresh: true });
+  console.log("getFreeGames forceRefresh", repulled.length);
 
   const fallbackFiltered = await getFreeGamesWithFallbackOptions("US", {
-    gamerPowerPlatforms: ["pc", "steam", "epic-games-store"]
+    gamerPowerPlatforms: ["pc", "steam", "epic-games-store"],
+    gamerPowerCategories: ["game", "dlc", "software", "game-code"],
+    freeToGamePlatforms: ["pc", "browser"],
+    freeToGameCategory: "shooter",
+    freeToGameSortBy: "release-date"
+  }, {
+    forceRefresh: true
   });
   console.log("getFreeGamesWithFallbackOptions", fallbackFiltered.length);
 
-  const gamerPowerSteam = await getGamerPowerGames(["steam"]);
+  const gamerPowerSteam = await getGamerPowerGames(["steam"], {
+    categories: ["giveaway", "game", "dlc"]
+  });
   console.log("getGamerPowerGames(steam)", gamerPowerSteam.length);
+  const gamerPowerSteamRepull = await getGamerPowerGames(["steam"], {
+    categories: ["giveaway", "game", "dlc"],
+    forceRefresh: true
+  });
+  console.log("getGamerPowerGames(steam) forceRefresh", gamerPowerSteamRepull.length);
 
-  const freeToGame = await getFreeToGameGames();
+  const freeToGame = await getFreeToGameGames({
+    platforms: ["pc", "browser"],
+    category: "mmorpg",
+    sortBy: "alphabetical",
+    forceRefresh: true
+  });
   console.log("getFreeToGameGames", freeToGame.length);
 
   console.log("epic", (await getEpicGames("US")).length);
@@ -57,6 +78,9 @@ async function main() {
   console.log("ubisoft", (await getUbisoftGames()).length);
   console.log("humble", (await getHumbleGames()).length);
   console.log("gog", (await getGogGames()).length);
+
+  // Optional: clear in-memory request cache
+  clearRequestCache();
 }
 ```
 
@@ -70,16 +94,29 @@ const checker = require("@nekosuneprojects/free-games-checker");
 ```
 
 ## Exported API
-- `getFreeGames(country: string)`
-- `getFreeGamesWithFallbackOptions(country: string, fallbackOptions: { gamerPowerPlatforms?: string[] })`
-- `getEpicGames(country: string)`
-- `getSteamGames()`
-- `getHumbleGames()`
+- `getFreeGames(country: string, options?: { forceRefresh?: boolean })`
+- `getFreeGamesWithFallbackOptions(country: string, fallbackOptions: { gamerPowerPlatforms?: string[]; gamerPowerCategories?: string[]; freeToGamePlatforms?: string[]; freeToGameCategory?: string; freeToGameSortBy?: "release-date" | "alphabetical" | "relevance" }, options?: { forceRefresh?: boolean })`
+- `getEpicGames(country: string, options?: { forceRefresh?: boolean })`
+- `getSteamGames(options?: { forceRefresh?: boolean })`
+- `getHumbleGames(options?: { forceRefresh?: boolean })`
 - `getAmazonGames()`
-- `getUbisoftGames()`
-- `getGogGames()`
-- `getGamerPowerGames(platforms?: string[])`
-- `getFreeToGameGames()`
+- `getUbisoftGames(options?: { forceRefresh?: boolean })`
+- `getGogGames(options?: { forceRefresh?: boolean })`
+- `getGamerPowerGames(platforms?: string[], options?: { categories?: string[]; forceRefresh?: boolean })`
+- `getFreeToGameGames(options?: { platforms?: string[]; category?: string; sortBy?: "release-date" | "alphabetical" | "relevance"; forceRefresh?: boolean })`
+- `clearRequestCache()`
+
+## Safety (Rate Limits + Cache)
+- All outgoing GET requests go through a shared safety layer with:
+- In-memory response cache (default TTL: 5 minutes)
+- Longer Steam app-page TTL cache (30 minutes)
+- Request de-duplication for identical in-flight calls
+- Per-service request pacing to avoid API spam
+- Rate-limit-aware pacing includes:
+- FreeToGame: max 10 req/s (100ms spacing)
+- GamerPower: max 4 req/s (250ms spacing)
+- Other providers also paced conservatively to reduce bursts
+- To bypass cache and repull fresh data immediately, use `forceRefresh: true`.
 
 ## GamerPower Platform Filters
 `getGamerPowerGames(platforms)` and `getFreeGamesWithFallbackOptions(..., { gamerPowerPlatforms })` support values like:
@@ -101,6 +138,23 @@ const checker = require("@nekosuneprojects/free-games-checker");
 - `origin`
 - `drm-free`
 - `xbox-360`
+
+## GamerPower Category Filters
+`getGamerPowerGames(..., { categories })` and `getFreeGamesWithFallbackOptions(..., { gamerPowerCategories })` support:
+- `giveaway` (all active giveaway items)
+- `game`
+- `dlc`
+- `software`
+- `game-code`
+- `loot`
+- `beta`
+- `other`
+
+## FreeToGame Filters
+`getFreeToGameGames(options)` and fallback options support:
+- `platforms`: `pc`, `browser`, `all`
+- `category`: genre/category values supported by FreeToGame API (for example `shooter`, `mmorpg`, `strategy`)
+- `sortBy`: `release-date`, `alphabetical`, `relevance`
 
 ## Output Shape
 ```json

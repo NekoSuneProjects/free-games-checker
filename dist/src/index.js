@@ -63,27 +63,154 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.getFreeToGameGames = exports.getGamerPowerGames = exports.getGogGames = exports.getUbisoftGames = exports.getAmazonGames = exports.getHumbleGames = exports.getSteamGames = exports.getEpicGames = exports.getFreeGamesWithFallbackOptions = exports.getFreeGames = void 0;
+exports.getFreeToGameGames = exports.getGamerPowerGames = exports.getGogGames = exports.getUbisoftGames = exports.getAmazonGames = exports.getHumbleGames = exports.getSteamGames = exports.getEpicGames = exports.getFreeGamesWithFallbackOptions = exports.getFreeGames = exports.clearRequestCache = void 0;
 var axios_1 = __importDefault(require("axios"));
 var config = __importStar(require("../config.json"));
+var responseCache = new Map();
+var inFlightRequests = new Map();
+var limiterNextAllowedAt = new Map();
+var CACHE_TTL_DEFAULT_MS = 5 * 60 * 1000;
+var CACHE_TTL_STEAM_APP_MS = 30 * 60 * 1000;
+var RATE_LIMIT_INTERVALS_MS = {
+    freetogame: 100,
+    gamerpower: 250,
+    humble: 500,
+    epic: 200,
+    steam: 350,
+    ubisoft: 350,
+    gog: 350,
+    default: 350
+};
+var sleep = function (ms) { return new Promise(function (resolve) { return setTimeout(resolve, ms); }); };
+var getServiceFromUrl = function (url) {
+    if (url.includes("freetogame.com"))
+        return "freetogame";
+    if (url.includes("gamerpower.com"))
+        return "gamerpower";
+    if (url.includes("humblebundle.com"))
+        return "humble";
+    if (url.includes("epicgames.com"))
+        return "epic";
+    if (url.includes("steampowered.com"))
+        return "steam";
+    if (url.includes("ubiservices.ubi.com") || url.includes("ubisoft.com"))
+        return "ubisoft";
+    if (url.includes("gog.com"))
+        return "gog";
+    return "default";
+};
+var buildCacheKey = function (url, requestConfig) {
+    var _a, _b;
+    return JSON.stringify({
+        url: url,
+        params: (_a = requestConfig === null || requestConfig === void 0 ? void 0 : requestConfig.params) !== null && _a !== void 0 ? _a : null,
+        headers: (_b = requestConfig === null || requestConfig === void 0 ? void 0 : requestConfig.headers) !== null && _b !== void 0 ? _b : null
+    });
+};
+var pruneCache = function () {
+    if (responseCache.size <= 1000)
+        return;
+    var now = Date.now();
+    responseCache.forEach(function (entry, key) {
+        if (entry.expiresAt <= now)
+            responseCache.delete(key);
+    });
+    while (responseCache.size > 750) {
+        var firstKey = responseCache.keys().next().value;
+        if (!firstKey)
+            break;
+        responseCache.delete(firstKey);
+    }
+};
+var waitForRateLimit = function (url) { return __awaiter(void 0, void 0, void 0, function () {
+    var service, intervalMs, now, nextAllowedAt, waitMs;
+    var _a, _b;
+    return __generator(this, function (_c) {
+        switch (_c.label) {
+            case 0:
+                service = getServiceFromUrl(url);
+                intervalMs = (_a = RATE_LIMIT_INTERVALS_MS[service]) !== null && _a !== void 0 ? _a : RATE_LIMIT_INTERVALS_MS.default;
+                now = Date.now();
+                nextAllowedAt = (_b = limiterNextAllowedAt.get(service)) !== null && _b !== void 0 ? _b : now;
+                waitMs = Math.max(0, nextAllowedAt - now);
+                limiterNextAllowedAt.set(service, Math.max(now, nextAllowedAt) + intervalMs);
+                if (!(waitMs > 0)) return [3 /*break*/, 2];
+                return [4 /*yield*/, sleep(waitMs)];
+            case 1:
+                _c.sent();
+                _c.label = 2;
+            case 2: return [2 /*return*/];
+        }
+    });
+}); };
+var safeGet = function (url, requestConfig, options) { return __awaiter(void 0, void 0, void 0, function () {
+    var ttlMs, forceRefresh, cacheKey, now, cached, inFlight, requestPromise;
+    var _a;
+    return __generator(this, function (_b) {
+        switch (_b.label) {
+            case 0:
+                ttlMs = (_a = options === null || options === void 0 ? void 0 : options.ttlMs) !== null && _a !== void 0 ? _a : CACHE_TTL_DEFAULT_MS;
+                forceRefresh = (options === null || options === void 0 ? void 0 : options.forceRefresh) === true;
+                cacheKey = buildCacheKey(url, requestConfig);
+                now = Date.now();
+                cached = forceRefresh ? undefined : responseCache.get(cacheKey);
+                if (cached && cached.expiresAt > now)
+                    return [2 /*return*/, cached.data];
+                inFlight = forceRefresh ? undefined : inFlightRequests.get(cacheKey);
+                if (inFlight)
+                    return [2 /*return*/, inFlight];
+                requestPromise = (function () { return __awaiter(void 0, void 0, void 0, function () {
+                    var response;
+                    return __generator(this, function (_a) {
+                        switch (_a.label) {
+                            case 0: return [4 /*yield*/, waitForRateLimit(url)];
+                            case 1:
+                                _a.sent();
+                                return [4 /*yield*/, axios_1.default.get(url, requestConfig)];
+                            case 2:
+                                response = _a.sent();
+                                responseCache.set(cacheKey, { expiresAt: Date.now() + ttlMs, data: response.data });
+                                pruneCache();
+                                return [2 /*return*/, response.data];
+                        }
+                    });
+                }); })();
+                inFlightRequests.set(cacheKey, requestPromise);
+                _b.label = 1;
+            case 1:
+                _b.trys.push([1, , 3, 4]);
+                return [4 /*yield*/, requestPromise];
+            case 2: return [2 /*return*/, _b.sent()];
+            case 3:
+                inFlightRequests.delete(cacheKey);
+                return [7 /*endfinally*/];
+            case 4: return [2 /*return*/];
+        }
+    });
+}); };
+var clearRequestCache = function () {
+    responseCache.clear();
+    inFlightRequests.clear();
+};
+exports.clearRequestCache = clearRequestCache;
 /* ================================
    Main Aggregator
 ================================ */
-var getFreeGames = function (country) { return __awaiter(void 0, void 0, void 0, function () {
+var getFreeGames = function (country, options) { return __awaiter(void 0, void 0, void 0, function () {
     var primaryGames, _a, gamerPowerGames, freeToGameGames;
     return __generator(this, function (_b) {
         switch (_b.label) {
             case 0:
                 if (!country)
                     throw new Error("Country is required");
-                return [4 /*yield*/, getPrimaryGames(country)];
+                return [4 /*yield*/, getPrimaryGames(country, options)];
             case 1:
                 primaryGames = _b.sent();
                 if (primaryGames.length > 0)
                     return [2 /*return*/, primaryGames];
                 return [4 /*yield*/, Promise.all([
-                        exports.getGamerPowerGames(),
-                        exports.getFreeToGameGames()
+                        exports.getGamerPowerGames(undefined, options),
+                        exports.getFreeToGameGames({ forceRefresh: options === null || options === void 0 ? void 0 : options.forceRefresh })
                     ])];
             case 2:
                 _a = _b.sent(), gamerPowerGames = _a[0], freeToGameGames = _a[1];
@@ -92,17 +219,17 @@ var getFreeGames = function (country) { return __awaiter(void 0, void 0, void 0,
     });
 }); };
 exports.getFreeGames = getFreeGames;
-var getPrimaryGames = function (country) { return __awaiter(void 0, void 0, void 0, function () {
+var getPrimaryGames = function (country, options) { return __awaiter(void 0, void 0, void 0, function () {
     var _a, epicGames, steamGames, humbleGames, amazonGames, gogGames, ubisoftGames, primaryGames;
     return __generator(this, function (_b) {
         switch (_b.label) {
             case 0: return [4 /*yield*/, Promise.all([
-                    exports.getEpicGames(country),
-                    exports.getSteamGames(),
-                    exports.getHumbleGames(),
+                    exports.getEpicGames(country, options),
+                    exports.getSteamGames(options),
+                    exports.getHumbleGames(options),
                     exports.getAmazonGames(),
-                    exports.getGogGames(),
-                    exports.getUbisoftGames()
+                    exports.getGogGames(options),
+                    exports.getUbisoftGames(options)
                 ])];
             case 1:
                 _a = _b.sent(), epicGames = _a[0], steamGames = _a[1], humbleGames = _a[2], amazonGames = _a[3], gogGames = _a[4], ubisoftGames = _a[5];
@@ -111,21 +238,29 @@ var getPrimaryGames = function (country) { return __awaiter(void 0, void 0, void
         }
     });
 }); };
-var getFreeGamesWithFallbackOptions = function (country, fallbackOptions) { return __awaiter(void 0, void 0, void 0, function () {
+var getFreeGamesWithFallbackOptions = function (country, fallbackOptions, options) { return __awaiter(void 0, void 0, void 0, function () {
     var primaryGames, _a, gamerPowerGames, freeToGameGames;
     return __generator(this, function (_b) {
         switch (_b.label) {
             case 0:
                 if (!country)
                     throw new Error("Country is required");
-                return [4 /*yield*/, getPrimaryGames(country)];
+                return [4 /*yield*/, getPrimaryGames(country, options)];
             case 1:
                 primaryGames = _b.sent();
                 if (primaryGames.length > 0)
                     return [2 /*return*/, primaryGames];
                 return [4 /*yield*/, Promise.all([
-                        exports.getGamerPowerGames(fallbackOptions.gamerPowerPlatforms),
-                        exports.getFreeToGameGames()
+                        exports.getGamerPowerGames(fallbackOptions.gamerPowerPlatforms, {
+                            categories: fallbackOptions.gamerPowerCategories,
+                            forceRefresh: options === null || options === void 0 ? void 0 : options.forceRefresh
+                        }),
+                        exports.getFreeToGameGames({
+                            platforms: fallbackOptions.freeToGamePlatforms,
+                            category: fallbackOptions.freeToGameCategory,
+                            sortBy: fallbackOptions.freeToGameSortBy,
+                            forceRefresh: options === null || options === void 0 ? void 0 : options.forceRefresh
+                        })
                     ])];
             case 2:
                 _a = _b.sent(), gamerPowerGames = _a[0], freeToGameGames = _a[1];
@@ -137,15 +272,15 @@ exports.getFreeGamesWithFallbackOptions = getFreeGamesWithFallbackOptions;
 /* ================================
    Epic Games
 ================================ */
-var getEpicGames = function (country) { return __awaiter(void 0, void 0, void 0, function () {
-    var response, games;
-    var _a, _b, _c, _d, _e;
-    return __generator(this, function (_f) {
-        switch (_f.label) {
-            case 0: return [4 /*yield*/, axios_1.default.get(config.epic_games_api_url + country)];
+var getEpicGames = function (country, options) { return __awaiter(void 0, void 0, void 0, function () {
+    var data, games;
+    var _a, _b, _c, _d;
+    return __generator(this, function (_e) {
+        switch (_e.label) {
+            case 0: return [4 /*yield*/, safeGet(config.epic_games_api_url + country, undefined, { forceRefresh: options === null || options === void 0 ? void 0 : options.forceRefresh })];
             case 1:
-                response = _f.sent();
-                games = (_e = (_d = (_c = (_b = (_a = response.data) === null || _a === void 0 ? void 0 : _a.data) === null || _b === void 0 ? void 0 : _b.Catalog) === null || _c === void 0 ? void 0 : _c.searchStore) === null || _d === void 0 ? void 0 : _d.elements) !== null && _e !== void 0 ? _e : [];
+                data = _e.sent();
+                games = (_d = (_c = (_b = (_a = data === null || data === void 0 ? void 0 : data.data) === null || _a === void 0 ? void 0 : _a.Catalog) === null || _b === void 0 ? void 0 : _b.searchStore) === null || _c === void 0 ? void 0 : _c.elements) !== null && _d !== void 0 ? _d : [];
                 return [2 /*return*/, games
                         .filter(function (game) {
                         var _a, _b, _c;
@@ -198,16 +333,15 @@ var extractSteamRows = function (resultsHtml) {
     }
     return rows;
 };
-var isSteamDlc = function (appId) { return __awaiter(void 0, void 0, void 0, function () {
-    var response, html, hasDlcArea, hasPurchaseArea, _a;
+var isSteamDlc = function (appId, options) { return __awaiter(void 0, void 0, void 0, function () {
+    var html, hasDlcArea, hasPurchaseArea, _a;
     return __generator(this, function (_b) {
         switch (_b.label) {
             case 0:
                 _b.trys.push([0, 2, , 3]);
-                return [4 /*yield*/, axios_1.default.get("" + config.steam_app_url + appId)];
+                return [4 /*yield*/, safeGet("" + config.steam_app_url + appId, undefined, { ttlMs: CACHE_TTL_STEAM_APP_MS, forceRefresh: options === null || options === void 0 ? void 0 : options.forceRefresh })];
             case 1:
-                response = _b.sent();
-                html = response.data;
+                html = _b.sent();
                 hasDlcArea = html.includes("game_area_dlc_bubble");
                 hasPurchaseArea = html.includes("game_area_purchase_game_wrapper");
                 if (hasDlcArea && hasPurchaseArea)
@@ -222,25 +356,25 @@ var isSteamDlc = function (appId) { return __awaiter(void 0, void 0, void 0, fun
         }
     });
 }); };
-var getSteamGames = function () { return __awaiter(void 0, void 0, void 0, function () {
-    var response, resultsHtml, steamRows, parsedGames, _i, steamRows_1, row, dlc;
-    var _a, _b;
-    return __generator(this, function (_c) {
-        switch (_c.label) {
-            case 0: return [4 /*yield*/, axios_1.default.get(config.steam_search_results_url)];
+var getSteamGames = function (options) { return __awaiter(void 0, void 0, void 0, function () {
+    var data, resultsHtml, steamRows, parsedGames, _i, steamRows_1, row, dlc;
+    var _a;
+    return __generator(this, function (_b) {
+        switch (_b.label) {
+            case 0: return [4 /*yield*/, safeGet(config.steam_search_results_url, undefined, { forceRefresh: options === null || options === void 0 ? void 0 : options.forceRefresh })];
             case 1:
-                response = _c.sent();
-                resultsHtml = (_b = (_a = response.data) === null || _a === void 0 ? void 0 : _a.results_html) !== null && _b !== void 0 ? _b : "";
+                data = _b.sent();
+                resultsHtml = (_a = data === null || data === void 0 ? void 0 : data.results_html) !== null && _a !== void 0 ? _a : "";
                 steamRows = extractSteamRows(resultsHtml);
                 parsedGames = [];
                 _i = 0, steamRows_1 = steamRows;
-                _c.label = 2;
+                _b.label = 2;
             case 2:
                 if (!(_i < steamRows_1.length)) return [3 /*break*/, 5];
                 row = steamRows_1[_i];
-                return [4 /*yield*/, isSteamDlc(row.id)];
+                return [4 /*yield*/, isSteamDlc(row.id, options)];
             case 3:
-                dlc = _c.sent();
+                dlc = _b.sent();
                 if (dlc === false) {
                     parsedGames.push({
                         id: row.id,
@@ -251,7 +385,7 @@ var getSteamGames = function () { return __awaiter(void 0, void 0, void 0, funct
                         platform: "steam"
                     });
                 }
-                _c.label = 4;
+                _b.label = 4;
             case 4:
                 _i++;
                 return [3 /*break*/, 2];
@@ -263,17 +397,17 @@ exports.getSteamGames = getSteamGames;
 /* ================================
    Humble Bundle
 ================================ */
-var getHumbleGames = function () { return __awaiter(void 0, void 0, void 0, function () {
-    var response, results, _a;
-    var _b, _c;
-    return __generator(this, function (_d) {
-        switch (_d.label) {
+var getHumbleGames = function (options) { return __awaiter(void 0, void 0, void 0, function () {
+    var data, results, _a;
+    var _b;
+    return __generator(this, function (_c) {
+        switch (_c.label) {
             case 0:
-                _d.trys.push([0, 2, , 3]);
-                return [4 /*yield*/, axios_1.default.get(config.humble_bundle_api_url)];
+                _c.trys.push([0, 2, , 3]);
+                return [4 /*yield*/, safeGet(config.humble_bundle_api_url, undefined, { forceRefresh: options === null || options === void 0 ? void 0 : options.forceRefresh })];
             case 1:
-                response = _d.sent();
-                results = (_c = (_b = response.data) === null || _b === void 0 ? void 0 : _b.results) !== null && _c !== void 0 ? _c : [];
+                data = _c.sent();
+                results = (_b = data === null || data === void 0 ? void 0 : data.results) !== null && _b !== void 0 ? _b : [];
                 return [2 /*return*/, results
                         .filter(function (game) { var _a; return ((_a = game.current_price) === null || _a === void 0 ? void 0 : _a.amount) === 0; })
                         .map(function (game) { return ({
@@ -285,7 +419,7 @@ var getHumbleGames = function () { return __awaiter(void 0, void 0, void 0, func
                         platform: "humble"
                     }); })];
             case 2:
-                _a = _d.sent();
+                _a = _c.sent();
                 return [2 /*return*/, []];
             case 3: return [2 /*return*/];
         }
@@ -306,23 +440,23 @@ exports.getAmazonGames = getAmazonGames;
 /* ================================
    Ubisoft / Ubisoft Connect
 ================================ */
-var getUbisoftGames = function () { return __awaiter(void 0, void 0, void 0, function () {
-    var response, news, _a;
-    var _b, _c;
-    return __generator(this, function (_d) {
-        switch (_d.label) {
+var getUbisoftGames = function (options) { return __awaiter(void 0, void 0, void 0, function () {
+    var data, news, _a;
+    var _b;
+    return __generator(this, function (_c) {
+        switch (_c.label) {
             case 0:
-                _d.trys.push([0, 2, , 3]);
-                return [4 /*yield*/, axios_1.default.get(config.ubisoft_news_api_url, {
+                _c.trys.push([0, 2, , 3]);
+                return [4 /*yield*/, safeGet(config.ubisoft_news_api_url, {
                         headers: {
                             "ubi-appid": config.ubisoft_app_id,
                             "ubi-localecode": "en-US",
                             "user-agent": "Mozilla/5.0"
                         }
-                    })];
+                    }, { forceRefresh: options === null || options === void 0 ? void 0 : options.forceRefresh })];
             case 1:
-                response = _d.sent();
-                news = (_c = (_b = response.data) === null || _b === void 0 ? void 0 : _b.news) !== null && _c !== void 0 ? _c : [];
+                data = _c.sent();
+                news = (_b = data === null || data === void 0 ? void 0 : data.news) !== null && _b !== void 0 ? _b : [];
                 return [2 /*return*/, news
                         .filter(function (item) { return item.type === "freegame" && item.expirationDate; })
                         .map(function (item) {
@@ -339,7 +473,7 @@ var getUbisoftGames = function () { return __awaiter(void 0, void 0, void 0, fun
                         });
                     })];
             case 2:
-                _a = _d.sent();
+                _a = _c.sent();
                 return [2 /*return*/, []];
             case 3: return [2 /*return*/];
         }
@@ -403,21 +537,21 @@ var getGogGiveawayGame = function (html) {
             platform: "gog"
         }];
 };
-var getGogGames = function () { return __awaiter(void 0, void 0, void 0, function () {
+var getGogGames = function (options) { return __awaiter(void 0, void 0, void 0, function () {
     var _a, promoResponse, storeResponse, homeResponse, promoProducts, promoGames, storeGames, giveawayGames, combined, deduped, _i, combined_1, game, key, _b;
-    var _c, _d;
-    return __generator(this, function (_e) {
-        switch (_e.label) {
+    var _c;
+    return __generator(this, function (_d) {
+        switch (_d.label) {
             case 0:
-                _e.trys.push([0, 2, , 3]);
+                _d.trys.push([0, 2, , 3]);
                 return [4 /*yield*/, Promise.all([
-                        axios_1.default.get(config.gog_promotions_api_url),
-                        axios_1.default.get(config.gog_store_free_discounted_url, { headers: { "user-agent": "Mozilla/5.0" } }),
-                        axios_1.default.get(config.gog_home_url, { headers: { "user-agent": "Mozilla/5.0" } })
+                        safeGet(config.gog_promotions_api_url, undefined, { forceRefresh: options === null || options === void 0 ? void 0 : options.forceRefresh }),
+                        safeGet(config.gog_store_free_discounted_url, { headers: { "user-agent": "Mozilla/5.0" } }, { forceRefresh: options === null || options === void 0 ? void 0 : options.forceRefresh }),
+                        safeGet(config.gog_home_url, { headers: { "user-agent": "Mozilla/5.0" } }, { forceRefresh: options === null || options === void 0 ? void 0 : options.forceRefresh })
                     ])];
             case 1:
-                _a = _e.sent(), promoResponse = _a[0], storeResponse = _a[1], homeResponse = _a[2];
-                promoProducts = (_d = (_c = promoResponse.data) === null || _c === void 0 ? void 0 : _c.products) !== null && _d !== void 0 ? _d : [];
+                _a = _d.sent(), promoResponse = _a[0], storeResponse = _a[1], homeResponse = _a[2];
+                promoProducts = (_c = promoResponse === null || promoResponse === void 0 ? void 0 : promoResponse.products) !== null && _c !== void 0 ? _c : [];
                 promoGames = promoProducts.map(function (game) {
                     var _a;
                     return ({
@@ -429,8 +563,8 @@ var getGogGames = function () { return __awaiter(void 0, void 0, void 0, functio
                         platform: "gog"
                     });
                 });
-                storeGames = getGogStoreGames(storeResponse.data);
-                giveawayGames = getGogGiveawayGame(homeResponse.data);
+                storeGames = getGogStoreGames(storeResponse);
+                giveawayGames = getGogGiveawayGame(homeResponse);
                 combined = __spreadArray(__spreadArray(__spreadArray([], giveawayGames), storeGames), promoGames);
                 deduped = new Map();
                 for (_i = 0, combined_1 = combined; _i < combined_1.length; _i++) {
@@ -441,7 +575,7 @@ var getGogGames = function () { return __awaiter(void 0, void 0, void 0, functio
                 }
                 return [2 /*return*/, Array.from(deduped.values())];
             case 2:
-                _b = _e.sent();
+                _b = _d.sent();
                 return [2 /*return*/, []];
             case 3: return [2 /*return*/];
         }
@@ -460,42 +594,88 @@ var toIsoDate = function (rawDate) {
         return undefined;
     return parsed.toISOString();
 };
-var mapGamerPowerGiveaways = function (giveaways) {
+var normalizeGiveawayCategory = function (item) {
+    var _a, _b, _c;
+    var rawType = String((_a = item === null || item === void 0 ? void 0 : item.type) !== null && _a !== void 0 ? _a : "").toLowerCase();
+    var text = (((_b = item === null || item === void 0 ? void 0 : item.title) !== null && _b !== void 0 ? _b : "") + " " + ((_c = item === null || item === void 0 ? void 0 : item.description) !== null && _c !== void 0 ? _c : "")).toLowerCase();
+    if (text.includes("dlc"))
+        return "dlc";
+    if (text.includes("software"))
+        return "software";
+    if (text.includes("game code") || text.includes("game codes") || text.includes("game key") || text.includes("cd key") || text.includes("key giveaway")) {
+        return "game-code";
+    }
+    if (rawType.includes("game"))
+        return "game";
+    if (rawType.includes("loot"))
+        return "loot";
+    if (rawType.includes("beta"))
+        return "beta";
+    return rawType || "other";
+};
+var normalizeCategoryFilter = function (input) {
+    var value = String(input || "").toLowerCase().trim().replace(/\s+/g, "-");
+    if (value === "giveaways")
+        return "giveaway";
+    if (value === "games")
+        return "game";
+    if (value === "dlcs")
+        return "dlc";
+    if (value === "softwares")
+        return "software";
+    if (value === "game-codes" || value === "game-code" || value === "codes" || value === "code")
+        return "game-code";
+    return value;
+};
+var mapGamerPowerGiveaways = function (giveaways, categoryFilter) {
     return giveaways
-        .filter(function (item) { return item.status === "Active" && item.type === "Game"; })
+        .filter(function (item) { return item.status === "Active"; })
         .map(function (item) { return ({
-        id: item.id,
-        title: item.title,
-        description: item.description || "Free giveaway listed on GamerPower",
-        mainImage: item.image || item.thumbnail || "",
-        url: item.open_giveaway || item.open_giveaway_url || item.gamerpower_url || "https://www.gamerpower.com/",
+        item: item,
+        normalizedCategory: normalizeGiveawayCategory(item)
+    }); })
+        .filter(function (mapped) {
+        return !categoryFilter ||
+            categoryFilter.size === 0 ||
+            categoryFilter.has("giveaway") ||
+            categoryFilter.has(mapped.normalizedCategory);
+    })
+        .map(function (item) { return ({
+        id: item.item.id,
+        title: item.item.title,
+        description: item.item.description || "Free giveaway listed on GamerPower",
+        mainImage: item.item.image || item.item.thumbnail || "",
+        url: item.item.open_giveaway || item.item.open_giveaway_url || item.item.gamerpower_url || "https://www.gamerpower.com/",
         platform: "gamerpower",
-        startDate: toIsoDate(item.published_date),
-        endDate: toIsoDate(item.end_date)
+        category: item.normalizedCategory,
+        startDate: toIsoDate(item.item.published_date),
+        endDate: toIsoDate(item.item.end_date)
     }); });
 };
-var getGamerPowerGames = function (platforms) { return __awaiter(void 0, void 0, void 0, function () {
-    var response, responses, deduped, all, _i, responses_1, response, _a, all_1, game, key, _b;
-    var _c, _d;
-    return __generator(this, function (_e) {
-        switch (_e.label) {
+var getGamerPowerGames = function (platforms, options) { return __awaiter(void 0, void 0, void 0, function () {
+    var categoryFilter, data, responsesData, deduped, all, _i, responsesData_1, data, _a, all_1, game, key, _b;
+    return __generator(this, function (_c) {
+        switch (_c.label) {
             case 0:
-                _e.trys.push([0, 4, , 5]);
+                _c.trys.push([0, 4, , 5]);
+                categoryFilter = (options === null || options === void 0 ? void 0 : options.categories) && options.categories.length > 0
+                    ? new Set(options.categories.map(function (category) { return normalizeCategoryFilter(category); }))
+                    : undefined;
                 if (!(!platforms || platforms.length === 0)) return [3 /*break*/, 2];
-                return [4 /*yield*/, axios_1.default.get(config.gamerpower_api_url)];
+                return [4 /*yield*/, safeGet(config.gamerpower_api_url, undefined, { forceRefresh: options === null || options === void 0 ? void 0 : options.forceRefresh })];
             case 1:
-                response = _e.sent();
-                return [2 /*return*/, mapGamerPowerGiveaways((_c = response.data) !== null && _c !== void 0 ? _c : [])];
+                data = _c.sent();
+                return [2 /*return*/, mapGamerPowerGiveaways(data !== null && data !== void 0 ? data : [], categoryFilter)];
             case 2: return [4 /*yield*/, Promise.all(platforms.map(function (platform) {
-                    return axios_1.default.get(config.gamerpower_api_url + "?platform=" + encodeURIComponent(platform));
+                    return safeGet(config.gamerpower_api_url + "?platform=" + encodeURIComponent(platform), undefined, { forceRefresh: options === null || options === void 0 ? void 0 : options.forceRefresh });
                 }))];
             case 3:
-                responses = _e.sent();
+                responsesData = _c.sent();
                 deduped = new Map();
                 all = [];
-                for (_i = 0, responses_1 = responses; _i < responses_1.length; _i++) {
-                    response = responses_1[_i];
-                    all.push.apply(all, mapGamerPowerGiveaways((_d = response.data) !== null && _d !== void 0 ? _d : []));
+                for (_i = 0, responsesData_1 = responsesData; _i < responsesData_1.length; _i++) {
+                    data = responsesData_1[_i];
+                    all.push.apply(all, mapGamerPowerGiveaways(data !== null && data !== void 0 ? data : [], categoryFilter));
                 }
                 for (_a = 0, all_1 = all; _a < all_1.length; _a++) {
                     game = all_1[_a];
@@ -505,37 +685,64 @@ var getGamerPowerGames = function (platforms) { return __awaiter(void 0, void 0,
                 }
                 return [2 /*return*/, Array.from(deduped.values())];
             case 4:
-                _b = _e.sent();
+                _b = _c.sent();
                 return [2 /*return*/, []];
             case 5: return [2 /*return*/];
         }
     });
 }); };
 exports.getGamerPowerGames = getGamerPowerGames;
-var getFreeToGameGames = function () { return __awaiter(void 0, void 0, void 0, function () {
-    var response, games, _a;
-    var _b;
+var mapFreeToGameGames = function (games) {
+    return games.map(function (item) { return ({
+        id: item.id,
+        title: item.title,
+        description: item.short_description || "Free-to-play game listed on FreeToGame",
+        mainImage: item.thumbnail || "",
+        url: item.game_url || item.freetogame_profile_url || "https://www.freetogame.com/",
+        platform: "freetogame",
+        category: item.genre ? String(item.genre).toLowerCase() : "game",
+        startDate: toIsoDate(item.release_date)
+    }); });
+};
+var getFreeToGameGames = function (options) { return __awaiter(void 0, void 0, void 0, function () {
+    var params, queryPrefix_1, data, responsesData, deduped, all, _i, responsesData_2, data, _a, all_2, game, key, _b;
     return __generator(this, function (_c) {
         switch (_c.label) {
             case 0:
-                _c.trys.push([0, 2, , 3]);
-                return [4 /*yield*/, axios_1.default.get(config.freetogame_api_url)];
+                _c.trys.push([0, 4, , 5]);
+                params = [];
+                if (options === null || options === void 0 ? void 0 : options.category)
+                    params.push("category=" + encodeURIComponent(options.category));
+                if (options === null || options === void 0 ? void 0 : options.sortBy)
+                    params.push("sort-by=" + encodeURIComponent(options.sortBy));
+                queryPrefix_1 = params.length > 0 ? "&" + params.join("&") : "";
+                if (!(!(options === null || options === void 0 ? void 0 : options.platforms) || options.platforms.length === 0)) return [3 /*break*/, 2];
+                return [4 /*yield*/, safeGet(config.freetogame_api_url + "?platform=all" + queryPrefix_1, undefined, { forceRefresh: options === null || options === void 0 ? void 0 : options.forceRefresh })];
             case 1:
-                response = _c.sent();
-                games = (_b = response.data) !== null && _b !== void 0 ? _b : [];
-                return [2 /*return*/, games.map(function (item) { return ({
-                        id: item.id,
-                        title: item.title,
-                        description: item.short_description || "Free-to-play game listed on FreeToGame",
-                        mainImage: item.thumbnail || "",
-                        url: item.game_url || item.freetogame_profile_url || "https://www.freetogame.com/",
-                        platform: "freetogame",
-                        startDate: toIsoDate(item.release_date)
-                    }); })];
-            case 2:
-                _a = _c.sent();
+                data = _c.sent();
+                return [2 /*return*/, mapFreeToGameGames(data !== null && data !== void 0 ? data : [])];
+            case 2: return [4 /*yield*/, Promise.all(options.platforms.map(function (platform) {
+                    return safeGet(config.freetogame_api_url + "?platform=" + encodeURIComponent(platform) + queryPrefix_1, undefined, { forceRefresh: options === null || options === void 0 ? void 0 : options.forceRefresh });
+                }))];
+            case 3:
+                responsesData = _c.sent();
+                deduped = new Map();
+                all = [];
+                for (_i = 0, responsesData_2 = responsesData; _i < responsesData_2.length; _i++) {
+                    data = responsesData_2[_i];
+                    all.push.apply(all, mapFreeToGameGames(data !== null && data !== void 0 ? data : []));
+                }
+                for (_a = 0, all_2 = all; _a < all_2.length; _a++) {
+                    game = all_2[_a];
+                    key = String(game.id);
+                    if (!deduped.has(key))
+                        deduped.set(key, game);
+                }
+                return [2 /*return*/, Array.from(deduped.values())];
+            case 4:
+                _b = _c.sent();
                 return [2 /*return*/, []];
-            case 3: return [2 /*return*/];
+            case 5: return [2 /*return*/];
         }
     });
 }); };
