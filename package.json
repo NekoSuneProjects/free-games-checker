@@ -1,13 +1,13 @@
 {
-  "name": "free-games-checker",
-  "version": "1.0.4",
+  "name": "@nekosuneprojects/free-games-checker",
+  "version": "1.0.0",
   "description": "Project designed for get free games from online stores.",
   "types": "dist",
   "main": "dist/src/index.js",
   "scripts": {
     "build": "tsc --build"
   },
-  "author": "Cagri Sungur",
+  "author": "NekoSuneVR",
   "license": "MIT",
   "keywords": [
     "epic-games",
@@ -20,7 +20,7 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/cagrisungur/free-games-checker.git"
+    "url": "git+https://github.com/NekoSuneProjects/free-games-checker.git"
   },
   "devDependencies": {
     "typescript": "^4.3.4"

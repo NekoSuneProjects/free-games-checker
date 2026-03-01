@@ -1,4 +1,3 @@
-// interfaces/free-game.interface.ts
 export interface FreeGameInterface {
     id: string | number;
     title: string;
@@ -9,3 +8,4 @@ export interface FreeGameInterface {
     startDate?: string;
     endDate?: string;
 }
+//# sourceMappingURL=free-game.interface.d.ts.map

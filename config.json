@@ -1,7 +1,17 @@
 {
   "epic_games_api_url": "https://store-site-backend-static.ak.epicgames.com/freeGamesPromotions?country=",
   "steam_featured_categories_url": "https://store.steampowered.com/api/featuredcategories",
+  "steam_search_results_url": "https://store.steampowered.com/search/results/?query&start=0&count=25&sort_by=Price_ASC&specials=1&infinite=1",
+  "steam_app_url": "https://store.steampowered.com/app/",
+  "humble_bundle_api_url": "https://www.humblebundle.com/store/api/search?sort=discount&filter=onsale&request=1",
+  "humble_bundle_store_url": "https://www.humblebundle.com/store/",
   "amazon_games_api_url": "https://gaming.amazon.com/home",
+  "ubisoft_news_api_url": "https://public-ubiservices.ubi.com/v1/spaces/news?spaceId=6d0af36b-8226-44b6-a03b-4660073a6349",
+  "ubisoft_app_id": "314d4fef-e568-454a-ae06-43e3bece12a6",
   "ubisoft_store_url": "https://store.ubisoft.com",
+  "gamerpower_api_url": "https://www.gamerpower.com/api/giveaways",
+  "freetogame_api_url": "https://www.freetogame.com/api/games",
+  "gog_home_url": "https://www.gog.com/",
+  "gog_store_free_discounted_url": "https://www.gog.com/en/games?priceRange=0,0&discounted=true",
   "gog_promotions_api_url": "https://www.gog.com/games/ajax/filtered?price=free"
 }
